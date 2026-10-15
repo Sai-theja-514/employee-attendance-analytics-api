@@ -1,0 +1,41 @@
+# Starter Code Review
+
+This document records defects identified in the original `app/main.py`, how they can be observed, and the corresponding fixes in the revised implementation.
+
+| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+|---|---|---|---|---|
+| 1 | `compute_late_minutes()` | Assumes the shift start is on the same calendar date as the punch-in. This can produce incorrect results for overnight shifts. | Test a punch-in associated with an overnight shift and compare the result with the intended shift start. | Added shift-aware date handling and centralized late-minute calculation. |
+| 2 | `compute_work_hours()` | Uses Python's built-in `round()`, which uses ties-to-even rounding rather than guaranteed half-up rounding. | Test work-hour values at rounding boundaries. | Added a half-up rounding helper and use it for derived numeric values. |
+| 3 | `compute_overtime()` | Always constructs shift end on the supplied attendance date, which is incorrect when the shift ends the next day. | Test an overnight shift whose punch-out occurs after midnight. | Added shift-end date handling for overnight shifts. |
+| 4 | `GET /health` | Returns success without checking MongoDB connectivity. | Stop or misconfigure MongoDB and request `/health`; the starter can still report success. | Added a database ping and an appropriate service-unavailable response when MongoDB access fails. |
+| 5 | `EmployeeIn` | Uses unvalidated strings for employee code, email, department, shift times, and joining date. | Submit malformed employee codes, invalid email addresses, invalid dates, or malformed shift times. | Added Pydantic field validation, including `EmailStr` for email format. |
+| 6 | `POST /employees` | Checks for an existing employee before inserting, but the check and insert are separate operations. Concurrent requests can create duplicates without a unique database constraint. | Submit concurrent requests with the same employee code. | Added a unique index on `emp_code` and handled duplicate-key errors. |
+| 7 | `POST /employees` | Stores `created_at` using naive `datetime.now()`, which makes timezone interpretation ambiguous. | Inspect stored timestamps across environments with different local timezones. | Standardized timestamp handling using UTC. |
+| 8 | `GET /employees` | Calculates `skip` as `page * page_size`, which skips the first page when `page=1`. | Request page 1 with multiple employees and verify the first records are returned. | Changed the offset to `(page - 1) * page_size`. |
+| 9 | `GET /employees` | Calculates `total` using `count_documents({})`, ignoring the department filter. | Filter by a department and compare `total` with the number of employees in that department. | Counted documents using the same filter as the list query. |
+| 10 | `GET /employees` | Does not validate pagination bounds, and its sort order is unspecified. | Submit invalid page values or repeat paginated requests while records are changing. | Added pagination validation and deterministic sorting. |
+| 11 | `POST /attendance/punch-in` | Does not reject an unknown employee before accessing the employee's shift fields. | Punch in using an employee code that is not registered. | Added an explicit employee existence check and a `404` response. |
+| 12 | `POST /attendance/punch-in` | Uses local `datetime.fromtimestamp()` / `datetime.now()` and derives the attendance date without consistent IST handling. | Send a timestamp near midnight UTC and compare the expected Indian attendance date. | Added explicit timestamp normalization and IST-aware attendance-date logic. |
+| 13 | `POST /attendance/punch-in` | Uses a truthiness check for `punched_at`, so a supplied value of `0` is treated as if no timestamp was supplied. | Send `punched_at=0` and observe that the current time is used instead. | Distinguished an omitted timestamp (`None`) from a supplied value and validated timestamp inputs. |
+| 14 | `POST /attendance/punch-in` | Checks for an existing attendance record before inserting, but concurrent requests can pass the check together. | Submit concurrent punch-in requests for the same employee and attendance date. | Added a unique compound index on employee code and attendance date, with duplicate-key handling. |
+| 15 | `POST /attendance/punch-in` | Accepts an unrestricted status string. | Submit a status outside the allowed attendance statuses. | Restricted accepted statuses using a Pydantic `Literal` definition. |
+| 16 | `GET /attendance` | Retrieves all matching records and sorts and paginates them in Python, creating unnecessary memory and processing overhead. | Test with a large attendance collection and observe that the full matching result set is loaded. | Moved filtering, sorting, pagination, and counting into MongoDB queries. |
+| 17 | `GET /attendance` | Returns MongoDB `_id` values inconsistently: it fetches documents without excluding `_id`, then replaces `_id` with `id` only for returned page records. | Inspect response fields and compare them with the API's intended response contract. | Excluded internal identifiers from the projection and returned a consistent response shape. |
+| 18 | Remaining attendance and analytics contract | The starter leaves punch-out, attendance correction and audit history, employee monthly analytics, department summary, late leaderboard, department trend, and query-explain endpoints unimplemented. | Request each documented endpoint and observe that it is missing. | Implemented the missing endpoints, including correction history and MongoDB aggregation-based analytics. |
+| 19 | Attendance timestamp validation | The original request model uses a permissive optional integer and does not validate the timestamp before using it. | Submit missing, malformed, or unexpected timestamp values. | Added timestamp validation and strict integer types for punch-in, punch-out, and correction timestamps. |
+| 20 | Department trend aggregation | MongoDB `$densify` cannot generate dates if the preceding aggregation returns no documents. The starter did not implement this endpoint, but the issue was discovered while completing it. | Request a valid department and date range with no matching attendance logs. | Added a fallback that generates each requested date when the aggregation returns no rows, and adjusted the upper `$densify` boundary to include the requested end date. |
+
+## Items examined and not considered defects
+
+- **MongoDB persistence:** Using MongoDB for employee and attendance data is consistent with the assignment's storage model.
+- **Duplicate employee response:** Returning `409 Conflict` when an employee code already exists is appropriate; the defect was the absence of database-level protection against concurrent inserts.
+- **Optional punch timestamp:** Allowing the client to omit `punched_at` can be useful when the server should use the current time. The defect was treating a supplied falsy value as though the field were omitted.
+- **Empty correction history:** An empty history list on a newly created attendance record is valid; corrections should append audit entries when changes occur.
+- **Pagination metadata:** Returning `page`, `page_size`, and `total` is useful. The defects were the incorrect offset and the unfiltered employee count.
+- **FastAPI startup event warning:** The existing startup hook works, although the installed FastAPI version warns that `on_event` is deprecated. This is a maintainability warning rather than evidence of incorrect endpoint behavior.
+
+## Verification notes
+
+The revised implementation was manually exercised through Swagger UI, including invalid email input, invalid timestamp types, duplicate punch-in handling, correction audit history, query-explain endpoints, and department trend date ranges.
+
+Automated validation tests currently pass: **4 passed**. Broader automated endpoint and analytics tests should be added before treating the full API as completely verified.
